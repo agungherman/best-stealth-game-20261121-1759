@@ -1,49 +1,57 @@
 # The Silent Stacks
 
 [![make.fun · best-stealth-game-20261121-1759](https://make.fun/badge/best-stealth-game-20261121-1759.svg)](https://make.fun/bounty/best-stealth-game-20261121-1759?utm_source=github&utm_medium=readme&utm_campaign=best-stealth-game-20261121-1759)
+[![rank](https://make.fun/badge/best-stealth-game-20261121-1759/agungherman/best-stealth-game-20261121-1759/rank.svg)](https://make.fun/bounty/best-stealth-game-20261121-1759/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=best-stealth-game-20261121-1759)
+[![reward](https://make.fun/badge/best-stealth-game-20261121-1759/agungherman/best-stealth-game-20261121-1759/reward.svg)](https://make.fun/bounty/best-stealth-game-20261121-1759?utm_source=github&utm_medium=readme&utm_campaign=best-stealth-game-20261121-1759)
 
-A top-down stealth game for make.fun's **best stealth game** bounty. Night has
-fallen on the Grand Archive: steal every rare manuscript and reach the green
-door without ever being seen.
+A top-down stealth game. Midnight in the Grand Archive: steal every
+manuscript on the floor, then slip out the green door without ever being
+seen. Three floors — the Reading Room, the Stacks, and the Vault — each
+with its own patrols to learn and routes that reward patience.
 
-## Play
+## How it plays
 
-Open `game/index.html` in a desktop browser (no build step, no network).
-Serve the `game/` folder with any static server, or just open the file.
+- **Move** with WASD or the arrow keys. Hold **Shift** to sneak: slower,
+  but a warden's suspicion climbs half as fast.
+- **Wardens** walk fixed patrols with lantern cones. Step into a cone and
+  the SEEN meter climbs — faster up close, slower in the dark corners.
+  At half the meter a warden walks over to look (`?`); at full it sounds
+  the alarm and gives chase (`!`). Break the line of sight and the meter
+  drains, a chance to recover.
+- **Coins** (3 per floor): press **E** to toss one ahead, or click a floor
+  tile, and the nearest warden walks over to look at where it landed.
+- **Manuscripts** glow on the shelves. Walk over one to pocket it. When
+  every manuscript on a floor is yours, the green door opens.
+- **Caught** means starting the floor again. **R** retries, **Enter**
+  advances.
 
-- **Move:** WASD / arrow keys
-- **Sneak:** hold Shift (slower, quieter, harder to spot)
-- **Toss a coin:** E or mouse click — the nearest warden comes to look at it
-- **Goal:** take every manuscript, then reach the green exit door
+## Feel
 
-Wardens patrol fixed rounds with lantern cones. Stand inside a cone with a
-clear line of sight and the detection ring fills — faster up close, slower
-while you sneak or stand in shadow. At half, a warden comes to investigate
-(`?`). At full, it chases you (`!`). Break line of sight and suspicion fades,
-so a near miss is a scare, not a sentence. Footsteps grow louder as a warden
-draws near.
+- Footsteps that tell you where a guard is: a warden's step is louder
+  and panned to the side it comes from. A sting when a warden grows
+  suspicious, a harsh alarm when the chase starts, a chime for every
+  manuscript. All sounds are made with WebAudio — no audio files.
+- Light is information: the lantern cones are raycast against the
+  shelves, so a cone stops at a wall, and the darkness hides everything
+  except the thief, the lanterns, and the things worth stealing.
 
-Three levels: **The Reading Room**, **The Stacks**, and **The Vault** — more
-wardens, faster patrols, and tighter cover as the night goes on.
+## Play it
 
-## Structure
+Open `game/index.html` in a desktop browser (or serve `game/` with any
+static server). No build step, no network request. `main.ts` hands the
+game in: it copies `game/` and `screenshots/` to `/output` and writes
+`/output/dossier.json`.
 
-- `game/index.html` — the page, HUD, and overlays
-- `game/src/config.js` — every tuning number in one place
-- `game/src/levels.js` — the three maps, the parser, and the pathfinder
-- `game/src/input.js` — keyboard and mouse state
-- `game/src/audio.js` — procedural WebAudio sound (no audio files)
-- `game/src/guards.js` — warden patrol, vision, and detection
-- `game/src/player.js` — movement, sneaking, coins, and pickups
-- `game/src/render.js` — the canvas: floor, cones, wardens, thief, darkness
-- `game/src/main.js` — the loop, the state machine, and screenshot mode
-- `main.ts` — copies the game and screenshots to `/output` and writes the dossier
-- `vendor/makefun-game.ts` — the kit's dossier library, unchanged
+## Files
 
-Screenshots: `?shot=1..4` poses a frozen frame of the game (the cover, a
-near miss, the alarm, and the ending) — the same rendering code, a staged
-moment.
-
-## License
-
-MIT — see `LICENSE`.
+- `main.ts` — the hand-in program
+- `game/index.html` — the page
+- `game/src/config.js` — every tuning number
+- `game/src/levels.js` — the three floors, the parser, the pathfinder
+- `game/src/input.js` — keyboard and mouse
+- `game/src/audio.js` — the procedural sounds
+- `game/src/guards.js` — warden patrols, vision, suspicion, chase
+- `game/src/player.js` — the thief: movement, sneak, coins, loot
+- `game/src/render.js` — the canvas scene, the cones, the darkness, the HUD
+- `game/src/main.js` — the loop, the state machine, the screenshot scenes
+- `screenshots/` — four shots of the game, taken from its own `?shot=` scenes
