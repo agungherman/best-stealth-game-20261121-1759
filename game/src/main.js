@@ -1,285 +1,210 @@
-// The Silent Stacks — the game loop and the state machine.
-//
-// States: menu -> playing -> caught | levelDone -> playing -> win.
-// The loop runs on requestAnimationFrame with a clamped delta, updates the
-// thief and every warden, and keeps the HUD honest. A `?shot=N` query
-// parameter (used only to take the entry's screenshots) poses one frozen
-// frame of the game instead: the same rendering code, a staged moment.
+// The Silent Stacks — the game itself.
+// Loads a floor, runs the loop, and owns the state machine: menu,
+// playing, caught, level clear, win. Wardens and the thief report what
+// happens through onEvent, and this file answers: a sting when a warden
+// grows suspicious, an alarm and a spotted mark when the chase starts,
+// a chime for a manuscript, and a tossed coin pulling the nearest
+// warden over to look. ?shot=1..4 stages a frozen scene for screenshots.
+
+import { CONFIG } from './config.js';
+import { LEVELS, parseLevel } from './levels.js';
+import { Input } from './input.js';
+import { Sound } from './audio.js';
+import { Warden } from './guards.js';
+import { Player } from './player.js';
+import { Renderer } from './render.js';
+
+export class Game {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.input = new Input();
+    this.input.attach(window);
+    this.sound = new Sound();
+    this.renderer = new Renderer(canvas);
+    this.state = 'menu';
+    this.levelIndex = 0;
+    this.timer = 0;
+    this.spotted = 0;
+    this.time = 0;
+    this.detection = 0;
+    this.exitOpen = false;
+    this.frozen = false;
+    this.coins = [];
+    this.loadLevel(0);
+    window.addEventListener('resize', () => this.renderer.resize());
+    const params = new URLSearchParams(window.location.search);
+    const shot = params.get('shot');
+    if (shot) this.applyShot(Number(shot));
+    this.last = performance.now();
+    requestAnimationFrame((t) => this.loop(t));
+  }
+
+  get level() { return this._level; }
+
+  loadLevel(i) {
+    this.levelIndex = i;
+    const def = LEVELS[i];
+    this._level = parseLevel(def);
+    this.player = new Player(this._level.playerStart.x, this._level.playerStart.y);
+    this.wardens = def.wardens.map((w) => new Warden(w, this._level, def.speed));
+    this.coins = [];
+    this.exitOpen = false;
+    this.detection = 0;
+  }
+
+  screenToTile(sx, sy) { return this.renderer.screenToTile(sx, sy); }
+
+  onEvent(type, data) {
+    if (type === 'suspicious') {
+      this.sound.sting();
+    } else if (type === 'alarm') {
+      this.sound.alarm();
+      this.spotted += 1;
+    } else if (type === 'caught') {
+      if (this.state === 'playing') this.state = 'caught';
+    } else if (type === 'pickup') {
+      this.sound.chime();
+      const got = this._level.manuscripts.filter((m) => m.taken).length;
+      if (got >= this._level.manuscripts.length) this.exitOpen = true;
+    } else if (type === 'coin') {
+      this.sound.coin();
+      this.coins.push({ x: data.x, y: data.y });
+      // The nearest warden in earshot walks over to look at the coin.
+      let best = null, bestD = Infinity;
+      for (const w of this.wardens) {
+        const d = Math.hypot(w.x - data.x, w.y - data.y);
+        if (d < bestD) { bestD = d; best = w; }
+      }
+      if (best && bestD <= CONFIG.coinLureRadius && best.state !== 'chase') {
+        best.state = 'investigate';
+        best.target = { x: data.x, y: data.y };
+        best.lookTime = 0;
+        best.planPathTo({ x: Math.floor(data.x), y: Math.floor(data.y) });
+      }
+    } else if (type === 'footstep') {
+      const dx = data.x - this.player.x;
+      const dist = Math.hypot(data.x - this.player.x, data.y - this.player.y);
+      this.sound.footstep(Math.max(-1, Math.min(1, dx / 6)), Math.max(0, 1 - dist / 12) * 0.45);
+    } else if (type === 'playerstep') {
+      this.sound.footstep(0, 0.07);
+    }
+  }
+
+  update(dt) {
+    if (this.state !== 'playing' || this.frozen) return;
+    this.timer += dt;
+    this.time += dt;
+    this.player.update(dt, this.input, this._level, this);
+    for (const w of this.wardens) w.update(dt, this);
+    this.detection = this.wardens.reduce((m, w) => Math.max(m, w.suspicion), 0);
+    // All manuscripts in hand and the thief at the green door: floor done.
+    if (this.exitOpen) {
+      const e = this._level.exit;
+      if (Math.hypot(e.x + 0.5 - this.player.x, e.y + 0.5 - this.player.y) <= CONFIG.exitDistance) {
+        if (this.levelIndex >= LEVELS.length - 1) {
+          this.state = 'win';
+          this.sound.win();
+        } else {
+          this.state = 'levelclear';
+        }
+      }
+    }
+    // Menu and overlay keys are handled in handleOverlays, which runs
+    // every frame; this update only runs while the game is being played.
+  }
+
+  handleOverlays() {
+    if (this.state === 'menu' && (this.input.justPressed('Enter') || this.input.takeClick())) {
+      this.sound.ensure();
+      this.state = 'playing';
+    } else if (this.state === 'levelclear' && this.input.justPressed('Enter')) {
+      this.loadLevel(this.levelIndex + 1);
+      this.state = 'playing';
+    } else if (this.state === 'caught' && this.input.justPressed('KeyR')) {
+      this.loadLevel(this.levelIndex);
+      this.state = 'playing';
+    } else if (this.state === 'win' && this.input.justPressed('KeyR')) {
+      this.timer = 0;
+      this.spotted = 0;
+      this.loadLevel(0);
+      this.state = 'playing';
+    }
+    if (this.input.gesture) this.sound.ensure();
+  }
+
+  loop(t) {
+    const dt = Math.min(0.05, Math.max(0, (t - this.last) / 1000));
+    this.last = t;
+    this.handleOverlays();
+    this.update(dt);
+    this.renderer.draw(this);
+    this.input.endFrame();
+    requestAnimationFrame((nt) => this.loop(nt));
+  }
+
+  // Stage a frozen scene for a screenshot. Positions are fixed, the
+  // clock is stopped, and nothing moves, so the render is identical
+  // every time it is taken.
+  applyShot(n) {
+    this.frozen = true;
+    this.time = 1.0;
+    this.state = 'playing';
+    const place = (w, x, y, facing, suspicion, state) => {
+      w.x = x; w.y = y; w.facing = facing;
+      w.suspicion = suspicion; w.state = state; w.path = [];
+    };
+    if (n === 1) {
+      // Cover: the Reading Room, wardens on patrol, cones sweeping.
+      this.loadLevel(0);
+      this.player.x = 4.5; this.player.y = 2.5; this.player.facing = 0;
+      place(this.wardens[0], 10.5, 3.5, 0, 0, 'patrol');
+      place(this.wardens[1], 15.5, 10.5, Math.PI, 0, 'patrol');
+    } else if (n === 2) {
+      // Near miss: sneaking in the Stacks aisle, a cone on the thief,
+      // the meter at 62 and a '?' over the warden.
+      this.loadLevel(1);
+      this.player.x = 8.5; this.player.y = 7.5; this.player.facing = 0; this.player.sneak = true;
+      place(this.wardens[0], 12.5, 7.5, Math.PI, 62, 'investigate');
+      place(this.wardens[1], 6.5, 13.5, -Math.PI / 2, 0, 'patrol');
+      place(this.wardens[2], 15.5, 2.5, Math.PI / 2, 0, 'patrol');
+      this.detection = 62;
+    } else if (n === 3) {
+      // Alarm: the cone is red, the warden is chasing, the thief is
+      // two steps from the green door.
+      this.loadLevel(1);
+      this._level.manuscripts[0].taken = true;
+      this._level.manuscripts[1].taken = true;
+      this.player.x = 12.5; this.player.y = 11.5; this.player.facing = Math.PI / 2;
+      place(this.wardens[0], 14.5, 11.5, Math.PI, 100, 'chase');
+      place(this.wardens[1], 4.5, 13.5, 0, 30, 'patrol');
+      place(this.wardens[2], 9.5, 2.5, Math.PI / 2, 0, 'patrol');
+      this.detection = 100;
+      this.spotted = 1;
+    } else {
+      // Finale: the Vault, every manuscript taken, the exit open and
+      // the thief stepping through the green door.
+      this.loadLevel(2);
+      for (const m of this._level.manuscripts) m.taken = true;
+      this.exitOpen = true;
+      this.player.x = 12.5; this.player.y = 13.5; this.player.facing = -Math.PI / 2;
+      place(this.wardens[0], 10.5, 2.5, 0, 0, 'patrol');
+      place(this.wardens[1], 4.5, 13.5, 0, 0, 'patrol');
+      place(this.wardens[2], 20.5, 13.5, Math.PI, 0, 'patrol');
+      place(this.wardens[3], 12.5, 7.5, -Math.PI / 2, 0, 'patrol');
+      this.timer = 187;
+    }
+  }
+
+  // Test helpers, used by the maker's own playtests.
+  debugWarp(x, y) { this.player.x = x; this.player.y = y; }
+  debugCollectAll() {
+    for (const m of this._level.manuscripts) m.taken = true;
+    this.exitOpen = true;
+  }
+  debugSetLevel(i) { this.loadLevel(i); this.state = 'playing'; }
+}
 
 const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d');
-
-const game = {
-  state: 'menu',           // menu | playing | caught | levelDone | win
-  levelIndex: 0,
-  parsed: null,
-  player: null,
-  guards: [],
-  coin: null,              // the tossed coin, while it lies on the floor
-  coinTimer: 0,
-  time: 0,                 // seconds in the current level
-  totalTime: 0,
-  spotted: 0,              // times the alarm was raised, all levels
-  lastTimestamp: 0,
-  messageTimer: 0,
-};
-
-function gameLoadLevel(index) {
-  game.levelIndex = index;
-  const def = LEVELS[index];
-  const parsed = parseLevel(def);
-  game.parsed = parsed;
-  game.player = playerMake(parsed.start);
-  game.guards = def.guards.map(function (g) { return guardMake(g, def.speed); });
-  game.coin = null;
-  game.coinTimer = 0;
-  game.time = 0;
-  game.messageTimer = 0;
-  gameUpdateHud();
-  setMessage('Level ' + (index + 1) + ' — ' + def.name + '. Take every manuscript, then reach the green door.');
-}
-
-function gameStart() {
-  audioInit();
-  game.levelIndex = 0;
-  game.totalTime = 0;
-  game.spotted = 0;
-  gameLoadLevel(0);
-  game.state = 'playing';
-  showOverlay(null);
-}
-
-function gameRetryLevel() {
-  gameLoadLevel(game.levelIndex);
-  game.state = 'playing';
-  showOverlay(null);
-}
-
-function gameNextLevel() {
-  game.levelIndex++;
-  if (game.levelIndex >= LEVELS.length) {
-    game.state = 'win';
-    showOverlay('win');
-    document.getElementById('winText').textContent =
-      'All three manuscripts, in ' + formatTime(game.totalTime) +
-      ', spotted ' + game.spotted + (game.spotted === 1 ? ' time.' : ' times.');
-    audioLevelClear();
-  } else {
-    gameLoadLevel(game.levelIndex);
-    game.state = 'playing';
-    showOverlay(null);
-  }
-}
-
-function gameCaught(reason) {
-  game.state = 'caught';
-  document.getElementById('caughtText').textContent = reason;
-  showOverlay('caught');
-  audioCaught();
-}
-
-function gameLevelDone() {
-  game.totalTime += game.time;
-  game.state = 'levelDone';
-  const last = game.levelIndex === LEVELS.length - 1;
-  document.getElementById('levelDoneText').textContent =
-    LEVELS[game.levelIndex].name + ' cleared in ' + formatTime(game.time) +
-    ' — spotted ' + game.spotted + (game.spotted === 1 ? ' time' : ' times') + ' so far.';
-  document.getElementById('nextBtn').textContent = last ? 'See the ending' : 'Next level';
-  showOverlay('levelDone');
-  audioLevelClear();
-}
-
-function showOverlay(which) {
-  const ids = ['menu', 'caught', 'levelDone', 'win'];
-  for (const id of ids) {
-    document.getElementById(id).classList.toggle('hidden', id !== which);
-  }
-}
-
-function setMessage(text) {
-  document.getElementById('msg').textContent = text;
-  game.messageTimer = 4;
-}
-
-function formatTime(seconds) {
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return m + ':' + (s < 10 ? '0' : '') + s;
-}
-
-function gameUpdateHud() {
-  const def = LEVELS[game.levelIndex];
-  const taken = game.parsed.loot.filter(function (item) { return item.taken; }).length;
-  document.getElementById('hudLevel').textContent =
-    (game.levelIndex + 1) + ' — ' + def.name;
-  document.getElementById('hudLoot').textContent = taken + ' / ' + game.parsed.loot.length;
-  document.getElementById('hudCoins').textContent = String(game.player.coins);
-  document.getElementById('hudSpotted').textContent = String(game.spotted);
-  document.getElementById('hudTime').textContent = formatTime(game.totalTime + game.time);
-  const worst = game.guards.reduce(function (m, g) { return Math.max(m, g.detection); }, 0);
-  const fill = document.getElementById('detectFill');
-  fill.style.width = worst.toFixed(0) + '%';
-  fill.style.background = worst >= 100 ? '#ff5a4b' : worst >= 50 ? '#f2a03c' : '#f2c94c';
-}
-
-// One frame of play.
-function gameTick(dt) {
-  game.time += dt;
-  const player = game.player;
-  const parsed = game.parsed;
-
-  playerUpdate(parsed, player, dt);
-
-  // A coin toss, from E or a mouse click.
-  if (input.coinPressed || input.mouseClicked) {
-    input.coinPressed = false;
-    input.mouseClicked = false;
-    if (game.state === 'playing') {
-      const spot = playerTossCoin(parsed, player);
-      if (spot) {
-        game.coin = { x: (spot.x + 0.5) * TILE, y: (spot.y + 0.5) * TILE, tileX: spot.x, tileY: spot.y };
-        game.coinTimer = 0;
-        setMessage('The coin clinks on the stone. A warden turns to look.');
-      } else if (player.coins <= 0) {
-        setMessage('No coins left. Patience will have to do.');
-      }
-    }
-  }
-
-  // The coin lies for a while, then the nearest warden comes to look at it.
-  if (game.coin) {
-    game.coinTimer += dt;
-    if (game.coinTimer > 0.4 && !game.coin.investigated) {
-      game.coin.investigated = true;
-      let nearest = null;
-      let nearestD = Infinity;
-      for (const guard of game.guards) {
-        const d = Math.hypot(guard.x - game.coin.x, guard.y - game.coin.y);
-        if (d < nearestD) { nearestD = d; nearest = guard; }
-      }
-      if (nearest && nearestD < COIN_HEAR_TILES * TILE && nearest.state === 'patrol') {
-        nearest.state = 'suspicious';
-        guardRouteTo(parsed, nearest, game.coin.tileX, game.coin.tileY);
-      }
-    }
-    if (game.coinTimer > 6) game.coin = null;
-  }
-
-  // The wardens, and what they notice.
-  const events = [];
-  for (const guard of game.guards) {
-    guardUpdate(parsed, guard, player, dt, events);
-  }
-  for (const event of events) {
-    if (event === 'alarm') {
-      game.spotted++;
-      setMessage('Spotted! Break line of sight — now!');
-      audioAlarm();
-    } else if (event === 'suspicious') {
-      setMessage('A warden heard something. Stay out of the light.');
-      audioSuspicious();
-    } else if (event === 'caught') {
-      gameCaught('A warden caught you in the open, lantern in your face.');
-      return;
-    }
-  }
-
-  // Manuscripts and the exit.
-  if (playerCollectLoot(parsed, player) > 0) {
-    const taken = parsed.loot.filter(function (item) { return item.taken; }).length;
-    if (taken === parsed.loot.length) {
-      setMessage('Every manuscript is yours. The green door is open — go!');
-    } else {
-      setMessage('Manuscript taken. ' + (parsed.loot.length - taken) + ' to go.');
-    }
-  }
-  if (playerAtExit(parsed, player)) {
-    gameLevelDone();
-    return;
-  }
-
-  if (game.messageTimer > 0) {
-    game.messageTimer -= dt;
-    if (game.messageTimer <= 0) document.getElementById('msg').textContent = '';
-  }
-  gameUpdateHud();
-}
-
-function gameFrame(timestamp) {
-  requestAnimationFrame(gameFrame);
-  const dt = Math.min(0.05, (timestamp - game.lastTimestamp) / 1000 || 0.016);
-  game.lastTimestamp = timestamp;
-  if (game.state === 'playing') gameTick(dt);
-  // After the win the level index runs past the last level; keep rendering
-  // the vault behind the win overlay instead of reading past the array.
-  const viewLevel = LEVELS[Math.min(game.levelIndex, LEVELS.length - 1)];
-  renderGame(ctx, game.parsed, viewLevel, game.player, game.guards, game.coin, timestamp / 1000);
-}
-
-// Screenshot mode: `?shot=1..4` poses one frozen frame of the game for the
-// entry's screenshots. It renders the same code, with a staged moment.
-function gameApplyShot(n) {
-  gameLoadLevel(n === 4 ? 2 : n - 1);
-  const parsed = game.parsed;
-  const player = game.player;
-  if (n === 1) {
-    // The cover: the whole first level, lanterns sweeping, loot glowing.
-    player.x = parsed.start.x;
-    player.y = parsed.start.y;
-    game.state = 'playing';
-  } else if (n === 2) {
-    // Crouched behind a shelf while a lantern sweeps just past.
-    player.x = (4.5) * TILE;
-    player.y = (6.5) * TILE;
-    player.sneaking = true;
-    player.facing = Math.PI;
-    const guard = game.guards[0];
-    guard.x = (8.5) * TILE;
-    guard.y = (6.5) * TILE;
-    guard.angle = 0;
-    guard.detection = 62;
-    game.state = 'playing';
-  } else if (n === 3) {
-    // The alarm: a warden has spotted the thief by the exit.
-    player.x = (17.5) * TILE;
-    player.y = (12.5) * TILE;
-    player.facing = Math.PI;
-    parsed.loot.forEach(function (item) { item.taken = true; });
-    const guard = game.guards[0];
-    guard.x = (14.5) * TILE;
-    guard.y = (10.5) * TILE;
-    guard.angle = Math.atan2(player.y - guard.y, player.x - guard.x);
-    guard.state = 'chase';
-    guard.detection = 100;
-    game.state = 'playing';
-  } else {
-    // The ending: the vault cleared, manuscripts in hand.
-    parsed.loot.forEach(function (item) { item.taken = true; });
-    player.x = (20.5) * TILE;
-    player.y = (13.5) * TILE;
-    player.facing = -Math.PI / 2;
-    game.state = 'playing';
-  }
-  gameUpdateHud();
-  showOverlay(null);
-  renderGame(ctx, parsed, LEVELS[game.levelIndex], player, game.guards, game.coin, 1.2);
-}
-
-function gameBoot() {
-  inputAttach(canvas);
-  document.getElementById('startBtn').addEventListener('click', gameStart);
-  document.getElementById('retryBtn').addEventListener('click', gameRetryLevel);
-  document.getElementById('nextBtn').addEventListener('click', gameNextLevel);
-  document.getElementById('againBtn').addEventListener('click', gameStart);
-  gameLoadLevel(0);
-  const shot = new URLSearchParams(window.location.search).get('shot');
-  if (shot) {
-    gameApplyShot(parseInt(shot, 10) || 1);
-  } else {
-    game.lastTimestamp = performance.now();
-    requestAnimationFrame(gameFrame);
-  }
-}
-
-gameBoot();
+const game = new Game(canvas);
+// The maker's playtests drive the game through this handle.
+window.__stealth = game;
