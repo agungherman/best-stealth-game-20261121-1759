@@ -1,95 +1,109 @@
 // The Silent Stacks — the thief.
-//
-// The player moves with WASD or the arrow keys, sneaks while Shift is held,
-// and tosses a coin with E or a mouse click: the coin lands where the mouse
-// points (within reach) and the nearest warden comes to look at it.
-// Manuscripts are picked up by walking over them; the exit opens once every
-// manuscript in the level is taken. Movement is axis-separated, so the thief
-// slides along walls instead of sticking to them.
+// Walks with WASD or the arrows, sneaks while Shift is held, tosses a
+// coin with E or a mouse click to pull a warden away, and pockets a
+// manuscript by walking over it. Movement is axis-separated against the
+// walls, so the thief slides along a shelf instead of sticking to it.
 
-function playerMake(start) {
-  return {
-    x: start.x,
-    y: start.y,
-    radius: 13,
-    sneaking: false,
-    moving: false,
-    facing: 0,          // radians; where the thief last walked toward
-    stepPhase: 0,
-    coins: COINS_PER_LEVEL,
-  };
-}
+import { CONFIG } from './config.js';
+import { isWall } from './levels.js';
 
-// Try to move by (dx, dy); each axis is tested on its own so the thief
-// slides along a wall instead of stopping dead on a corner.
-function playerTryMove(parsed, player, dx, dy) {
-  const r = player.radius;
-  const canStand = function (x, y) {
-    const tiles = [
-      [Math.floor((x - r) / TILE), Math.floor((y - r) / TILE)],
-      [Math.floor((x + r) / TILE), Math.floor((y - r) / TILE)],
-      [Math.floor((x - r) / TILE), Math.floor((y + r) / TILE)],
-      [Math.floor((x + r) / TILE), Math.floor((y + r) / TILE)],
-    ];
-    for (const t of tiles) {
-      if (!levelTileWalkable(parsed, t[0], t[1])) return false;
+export class Player {
+  constructor(x, y) {
+    this.x = x + 0.5;
+    this.y = y + 0.5;
+    this.facing = 0; // radians; 0 is east
+    this.sneak = false;
+    this.coins = CONFIG.coinsPerLevel;
+    this.moving = false;
+    this.tileKey = Math.floor(this.x) + ',' + Math.floor(this.y);
+  }
+
+  reset(x, y) {
+    this.x = x + 0.5;
+    this.y = y + 0.5;
+    this.facing = 0;
+    this.sneak = false;
+    this.coins = CONFIG.coinsPerLevel;
+    this.moving = false;
+    this.tileKey = Math.floor(this.x) + ',' + Math.floor(this.y);
+  }
+
+  // One axis at a time, so a diagonal push slides along a wall.
+  tryMove(level, dx, dy) {
+    const r = CONFIG.playerRadius;
+    const nx = this.x + dx;
+    if (!hitsWall(level, nx, this.y, r)) this.x = nx;
+    const ny = this.y + dy;
+    if (!hitsWall(level, this.x, ny, r)) this.y = ny;
+  }
+
+  update(dt, input, level, world) {
+    const axis = input.moveAxis();
+    this.sneak = input.sneak;
+    const speed = this.sneak ? CONFIG.playerSneak : CONFIG.playerWalk;
+    this.moving = axis.x !== 0 || axis.y !== 0;
+    if (this.moving) {
+      this.facing = Math.atan2(axis.y, axis.x);
+      this.tryMove(level, axis.x * speed * dt, axis.y * speed * dt);
     }
-    return true;
-  };
-  if (dx !== 0 && canStand(player.x + dx, player.y)) player.x += dx;
-  if (dy !== 0 && canStand(player.x, player.y + dy)) player.y += dy;
-}
 
-function playerUpdate(parsed, player, dt) {
-  const dir = inputMoveDirection();
-  player.sneaking = input.sneak;
-  player.moving = dir.x !== 0 || dir.y !== 0;
-  if (player.moving) {
-    const speed = player.sneaking ? PLAYER_SNEAK_SPEED : PLAYER_WALK_SPEED;
-    playerTryMove(parsed, player, dir.x * speed * dt, dir.y * speed * dt);
-    player.facing = Math.atan2(dir.y, dir.x);
-    // Soft steps, slower and quieter while sneaking.
-    player.stepPhase += dt * speed * 0.11;
-    if (player.stepPhase > Math.PI) {
-      player.stepPhase -= Math.PI * 2;
-      audioFootstep(player.sneaking ? 0.25 : 0.6, 0);
+    // A footstep each time the thief crosses into a new tile.
+    const key = Math.floor(this.x) + ',' + Math.floor(this.y);
+    if (key !== this.tileKey) {
+      this.tileKey = key;
+      world.onEvent('playerstep', this);
     }
+
+    // Toss a coin: E throws it ahead, a click throws it at the tile.
+    if (input.justPressed('KeyE')) this.tossAhead(world);
+    const click = input.takeClick();
+    if (click) this.tossAtClick(world, click);
+
+    // Pocket any manuscript underfoot.
+    for (const m of level.manuscripts) {
+      if (!m.taken && Math.hypot(m.x + 0.5 - this.x, m.y + 0.5 - this.y) <= CONFIG.pickupDistance) {
+        m.taken = true;
+        world.onEvent('pickup', m);
+      }
+    }
+  }
+
+  tossAhead(world) {
+    if (this.coins <= 0) return;
+    const tx = this.x + Math.cos(this.facing) * CONFIG.coinThrow;
+    const ty = this.y + Math.sin(this.facing) * CONFIG.coinThrow;
+    this.tossCoin(world, tx, ty);
+  }
+
+  tossAtClick(world, click) {
+    if (this.coins <= 0) return;
+    const tile = world.screenToTile(click.x, click.y);
+    if (!tile) return;
+    const dist = Math.hypot(tile.x + 0.5 - this.x, tile.y + 0.5 - this.y);
+    if (dist > CONFIG.coinClickRange) return;
+    if (isWall(world.level, tile.x, tile.y)) return;
+    this.tossCoin(world, tile.x + 0.5, tile.y + 0.5);
+  }
+
+  tossCoin(world, x, y) {
+    this.coins -= 1;
+    world.onEvent('coin', { x, y });
   }
 }
 
-// A coin toss: returns the tile the coin lands on, or null when the player
-// has no coins left or the target is out of reach / inside a wall.
-function playerTossCoin(parsed, player) {
-  if (player.coins <= 0) return null;
-  const dx = input.mouseX - player.x;
-  const dy = input.mouseY - player.y;
-  const dist = Math.hypot(dx, dy);
-  if (dist > COIN_RANGE_TILES * TILE) return null;
-  const tx = Math.floor(input.mouseX / TILE);
-  const ty = Math.floor(input.mouseY / TILE);
-  if (!levelTileWalkable(parsed, tx, ty)) return null;
-  player.coins--;
-  audioCoinClink();
-  return { x: tx, y: ty };
-}
-
-// Pick up any manuscript the thief stands on. Returns how many were taken.
-function playerCollectLoot(parsed, player) {
-  let taken = 0;
-  for (const item of parsed.loot) {
-    if (item.taken) continue;
-    if (Math.hypot(item.x - player.x, item.y - player.y) < TILE * 0.7) {
-      item.taken = true;
-      taken++;
+// Would a circle of radius r at (x, y) touch a wall? Checks the tiles
+// the circle overlaps, so the thief cannot clip a shelf corner.
+function hitsWall(level, x, y, r) {
+  const x0 = Math.floor(x - r), x1 = Math.floor(x + r);
+  const y0 = Math.floor(y - r), y1 = Math.floor(y + r);
+  for (let cy = y0; cy <= y1; cy++) {
+    for (let cx = x0; cx <= x1; cx++) {
+      if (isWall(level, cx, cy)) {
+        const nearestX = Math.max(cx, Math.min(x, cx + 1));
+        const nearestY = Math.max(cy, Math.min(y, cy + 1));
+        if (Math.hypot(x - nearestX, y - nearestY) < r) return true;
+      }
     }
   }
-  if (taken > 0) audioPickup();
-  return taken;
-}
-
-// Has the thief reached the exit, with every manuscript already taken?
-function playerAtExit(parsed, player) {
-  const remaining = parsed.loot.filter(function (item) { return !item.taken; }).length;
-  if (remaining > 0) return false;
-  return Math.hypot(parsed.exit.x - player.x, parsed.exit.y - player.y) < TILE * 0.7;
+  return false;
 }
